@@ -214,11 +214,11 @@ class SMS:
         # Convert the content from hexadecimals to ASCII
         try:
             # Try to decode to UTF-8 first
-            decoded = bytes.fromhex(content).decode('utf-8').replace('\x00', '')
+            decoded = bytes.fromhex(content).decode('utf-8')
         except UnicodeDecodeError:
             try:
                 # Try to decode to latin-1 if UTF-8 failed
-                decoded = bytes.fromhex(content).decode('latin-1').replace('\x00', '')
+                decoded = bytes.fromhex(content).decode('latin-1')
             except UnicodeDecodeError:
                 # Somehow failed to decode the SMS content
                 log.error(f'Failed to decode SMS content: {content}')
