@@ -63,26 +63,31 @@ class SMS:
         try:
             self.modem_ip = os.environ['MODEM_IP']
         except ValueError:
-            log.exception('Missing MODEM_IP environment variable')
+            log.error('Missing MODEM_IP environment variable')
             exit(1)
 
         try:
             self.modem_password = os.environ['MODEM_PASSWORD']
         except ValueError:
-            log.exception('Missing MODEM_PASSWORD environment variable')
+            log.error('Missing MODEM_PASSWORD environment variable')
             exit(1)
 
         try:
             self.smtp_sender = os.environ['SMTP_SENDER']
         except ValueError:
-            log.exception('Missing SMTP_SENDER environment variable')
+            log.error('Missing SMTP_SENDER environment variable')
             exit(1)
 
         try:
             self.smtp_recipients = os.environ['SMTP_RECIPIENTS'].split(',')
         except ValueError:
-            log.exception('Missing SMTP_RECIPIENTS environment variable')
+            log.error('Missing SMTP_RECIPIENTS environment variable')
             exit(1)
+        if len(self.smtp_recipients) == 0:
+            log.error('SMTP_RECIPIENTS environment variable must contain at least one recipient')
+            exit(1)
+
+        log.info(f'Loaded {len(self.smtp_recipients)} SMTP recipients: {self.smtp_recipients}')
 
         # Optional SMTP settings
         # Login is not required
@@ -93,7 +98,7 @@ class SMS:
         try:
             self.smtp_host = os.environ['SMTP_HOST']
         except ValueError:
-            log.exception('Missing SMTP_HOST environment variable')
+            log.error('Missing SMTP_HOST environment variable')
             exit(1)
 
         # Get the SMTP port and ensure it's a valid port number

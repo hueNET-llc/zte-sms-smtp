@@ -1,11 +1,11 @@
 FROM alpine:3.18
 
-COPY . /apc
+COPY . /sms
 
-WORKDIR /apc
+WORKDIR /sms
 
 RUN apk update && \
     apk add --no-cache python3 py3-pip && \
     pip install --no-cache-dir -r requirements.txt
 
-ENTRYPOINT ["python", "-u", "apc.py"]
+ENTRYPOINT ["python", "-u", "sms.py"]
