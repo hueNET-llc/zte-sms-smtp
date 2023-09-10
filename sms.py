@@ -212,8 +212,21 @@ class SMS:
             str: ASCII decoded SMS content
         """
         # Convert the content from hexadecimals to ASCII
-        # Also strip null bytes from the ASCII output
-        return bytes.fromhex(content).decode().replace('\x00', '')
+        try:
+            # Try to decode to UTF-8 first
+            decoded = bytes.fromhex(content).decode('utf-8').replace('\x00', '')
+        except UnicodeDecodeError:
+            try:
+                # Try to decode to latin-1 if UTF-8 failed
+                decoded = bytes.fromhex(content).decode('latin-1').replace('\x00', '')
+            except UnicodeDecodeError:
+                # Somehow failed to decode the SMS content
+                log.error(f'Failed to decode SMS content: {content}')
+                # Fallback and return the raw content
+                decoded = content
+
+        # Strip null bytes from the decoded output
+        return decoded.replace('\x00', '')
 
     def decode_sms_timestamp(self, timestamp: str) -> datetime:
         """
