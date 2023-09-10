@@ -286,6 +286,13 @@ class SMS:
             # Fetch the latest SMS inbox list
             try:
                 sms_inbox_latest = self.fetch_sms_inbox(self.modem_ip, cookie)
+                # Check if the inbox list is empty
+                if len(sms_inbox_latest) == 0:
+                    log.debug('Got empty SMS inbox list, skipping')
+                    continue
+                elif len(sms_inbox_latest) < len(sms_inbox):
+                    log.debug('Got smaller SMS inbox list than previous, fetching again to confirm')
+                    raise KeyError
             except requests.exceptions.ConnectTimeout as e:
                 log.warning(f'Failed to fetch SMS inbox: {e}')
                 continue
@@ -317,6 +324,11 @@ class SMS:
                     content = self.decode_sms_content(sms['content'])
                     # Decode the SMS timestamp
                     timestamp = self.decode_sms_timestamp(sms['date'])
+                    # Check if the SMS is older than a day
+                    if (datetime.now() - timestamp).days > 1:
+                        # Probably not actually a new SMS, skip it
+                        log.debug(f'Skipping SMS from {sms["number"]} as it is older than a day')
+                        continue
 
                     log.info(f'Received new SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Message: {content}')
 
