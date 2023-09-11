@@ -5,7 +5,7 @@ COPY . /sms
 WORKDIR /sms
 
 RUN apk update && \
-    apk add --no-cache python3 py3-pip && \
+    apk add --no-cache python3 py3-pip tzdata && \
     pip install --no-cache-dir -r requirements.txt
 
 ENTRYPOINT ["python", "-u", "sms.py"]
