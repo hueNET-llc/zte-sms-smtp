@@ -363,5 +363,8 @@ class SMS:
                             # Retry SMTP send after 15 seconds
                             sleep(15)
 
+            # Update the SMS inbox list
+            sms_inbox = sms_inbox_latest
+
 sms = SMS()
 sms.run()
