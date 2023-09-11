@@ -323,16 +323,13 @@ class SMS:
 
             log.debug(f'Fetched latest SMS inbox list: {sms_inbox_latest}')
 
-            # Check if the latest SMS inbox list is different from the previous one
-            if sms_inbox_latest != sms_inbox:
-                # Get the difference between the two lists
-                sms_new = [sms for sms in sms_inbox_latest if sms not in sms_inbox]
-                log.debug(f'Got new SMS messages: {sms_new}')
-                # Update the previous SMS inbox list
-                sms_inbox = sms_inbox_latest
+            sms_old = [f'{sms["number"]}{sms["content"]}{sms["date"]}' for sms in sms_inbox]
+            sms_new = [(f'{sms["number"]}{sms["content"]}{sms["date"]}', sms) for sms in sms_inbox_latest]
 
-                # Loop through all new SMS messages
-                for sms in sms_new:
+            for sms in sms_new:
+                if sms[0] not in sms_old:
+                    # Get the full SMS object
+                    sms = sms[1]
                     # Decode the SMS content
                     content = self.decode_sms_content(sms['content'])
                     # Decode the SMS timestamp
