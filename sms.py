@@ -1,6 +1,8 @@
 import colorlog
 import logging
+import json
 import os
+import re
 import requests
 import sys
 
@@ -15,7 +17,17 @@ log = logging.getLogger('SMS')
 
 class SMS:
     def __init__(self):
+        # Setup logging
+        self._setup_logging()
+        # Load environment variables
+        self._load_env_vars()
+        # Create a new HTTP client
         self.http = requests.Session()
+
+        self.blacklist = {
+            'numbers': [],
+            'words': []
+        }
 
     def _setup_logging(self):
         """
@@ -115,11 +127,77 @@ class SMS:
             log.exception('Invalid SMTP_TLS environment variable, must be a boolean')
             exit(1)
 
+        # Get the Delete SMS setting
+        try:
+            self.delete_sms = bool(os.environ.get('MODEM_DELETE_SMS', True))
+        except ValueError:
+            log.exception('Invalid DELETE_SMS environment variable, must be a boolean')
+            exit(1)
+
         try:
             self.inbox_fetch_interval = int(os.environ.get('MODEM_SMS_INBOX_FETCH_INTERVAL', 30))
         except ValueError:
             log.exception('Invalid MODEM_SMS_INBOX_FETCH_INTERVAL environment variable, must be a number')
             exit(1)
+
+    def _load_blacklist(self):
+        """
+        Load the SMS word and number blacklist from a JSON file blacklist.json
+        """
+        try:
+            with open('blacklist.json', 'r') as f:
+                blacklist = json.load(f)
+                for word in blacklist.get('words', []):
+                    self.blacklist['words'].append(re.compile(word))
+                for number in blacklist.get('numbers', []):
+                    self.blacklist['numbers'].append(re.compile(number))
+            log.info(f'Loaded blacklist with {len(self.blacklist["words"])} words and {len(self.blacklist["numbers"])} numbers')
+        except FileNotFoundError:
+            log.info('blacklist.json not found, not using a blacklist')
+            self.blacklist = []
+        except json.decoder.JSONDecodeError:
+            log.warning('blacklist.json does not contain valid JSON')
+
+    def decode_sms_content(self, content: str) -> str:
+        """
+        Decode the SMS content from hexadecimals to ASCII
+
+        Args:
+            content (str): Hexadecimal encoded SMS content
+
+        Returns:
+            str: ASCII decoded SMS content
+        """
+        # Convert the content from hexadecimals to ASCII
+        try:
+            # Try to decode to UTF-8 first
+            decoded = bytes.fromhex(content).decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                # Try to decode to latin-1 if UTF-8 failed
+                decoded = bytes.fromhex(content).decode('latin-1')
+            except UnicodeDecodeError:
+                # Somehow failed to decode the SMS content
+                log.error(f'Failed to decode SMS content: {content}')
+                # Fallback and return the raw content
+                decoded = content
+
+        # Strip null bytes from the decoded output
+        return decoded.replace('\x00', '')
+
+    def decode_sms_timestamp(self, timestamp: str) -> datetime:
+        """
+        Decode the SMS timestamp into a datetime object
+
+        Args:
+            timestamp (str): SMS timestamp (e.g. 23,09,09,10,44,00,-12)
+
+        Returns:
+            datetime: Datetime-parsed SMS timestamp
+        """
+        # Decode the timestamp into a tz-aware datetime object
+        # YY:MM:DD:HH:MM:SS
+        return datetime.strptime(timestamp[:-4], '%y,%m,%d,%H,%M,%S')
 
     def login(self, modem_ip: str, modem_pass: str) -> requests.cookies.RequestsCookieJar:
         """
@@ -173,7 +251,7 @@ class SMS:
         Returns:
             list[dict]: List of all SMS messages
         """
-        # http://10.1.0.1/goform/goform_get_cmd_process?isTest=false&cmd=sms_data_total&page=0&data_per_page=500&mem_store=1&tags=10&order_by=order+by+id+desc&_=1694368424103
+        # GET http://10.1.0.1/goform/goform_get_cmd_process?isTest=false&cmd=sms_data_total&page=0&data_per_page=500&mem_store=1&tags=10&order_by=order+by+id+desc&_=1694368424103
         url = f'http://{modem_ip}/goform/goform_get_cmd_process'
         params = {
             'isTest': False,
@@ -190,7 +268,6 @@ class SMS:
             'X-Requested-With': 'XMLHttpRequest'
         }
 
-
         sms_request = self.http.get(
             url,
             params=params,
@@ -201,46 +278,43 @@ class SMS:
 
         return sms_request.json()['messages']
 
-    def decode_sms_content(self, content: str) -> str:
+    def delete_sms(self, modem_ip: str, cookies: requests.cookies.RequestsCookieJar, sms_id: str) -> bool:
         """
-        Decode the SMS content from hexadecimals to ASCII
+        Delete an SMS message from the ZTE modem
 
         Args:
-            content (str): Hexadecimal encoded SMS content
-
-        Returns:
-            str: ASCII decoded SMS content
+            modem_ip (str): ZTE modem IP address
+            cookies (requests.cookies.RequestsCookieJar): Cookie jar containing a session cookie
+            sms_id (int): SMS ID to delete
         """
-        # Convert the content from hexadecimals to ASCII
+        # POST http://10.1.0.1/goform/goform_set_cmd_process
+        url = f'http://{modem_ip}/goform/goform_set_cmd_process'
+        form = {
+            'isTest': False,
+            'goformId': 'DELETE_SMS',
+            'msg_id': f'{sms_id};',
+            'notCallback': True,
+        }
+        headers = {
+            'Host': f'{modem_ip}',
+            'Referer': f'http://{modem_ip}/index.html',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+
+        sms_request = self.http.post(
+            url,
+            headers=headers,
+            cookies=cookies,
+            data=form,
+            timeout=30
+        )
+
         try:
-            # Try to decode to UTF-8 first
-            decoded = bytes.fromhex(content).decode('utf-8')
-        except UnicodeDecodeError:
-            try:
-                # Try to decode to latin-1 if UTF-8 failed
-                decoded = bytes.fromhex(content).decode('latin-1')
-            except UnicodeDecodeError:
-                # Somehow failed to decode the SMS content
-                log.error(f'Failed to decode SMS content: {content}')
-                # Fallback and return the raw content
-                decoded = content
+            # Check if the SMS was deleted successfully
+            return sms_request.json()['result'] == 'success'
+        except (KeyError, json.decoder.JSONDecodeError):
+            return False
 
-        # Strip null bytes from the decoded output
-        return decoded.replace('\x00', '')
-
-    def decode_sms_timestamp(self, timestamp: str) -> datetime:
-        """
-        Decode the SMS timestamp into a datetime object
-
-        Args:
-            timestamp (str): SMS timestamp (e.g. 23,09,09,10,44,00,-12)
-
-        Returns:
-            datetime: Datetime-parsed SMS timestamp
-        """
-        # Decode the timestamp into a tz-aware datetime object
-        # YY:MM:DD:HH:MM:SS
-        return datetime.strptime(timestamp[:-4], '%y,%m,%d,%H,%M,%S')
 
     def send_email(self, sender: str, recipient: str | list, subject: str, body: str, smtp_username: str, smtp_password: str, smtp_host: str, smtp_port: int, tls: bool):
         """
@@ -270,11 +344,6 @@ class SMS:
         smtp.quit()
 
     def run(self):
-        # Setup logging
-        self._setup_logging()
-        # Load environment variables
-        self._load_env_vars()
-
         # Login and fetch the initial SMS inbox list on the first run
         while True:
             try:
@@ -330,8 +399,40 @@ class SMS:
                 if sms[0] not in sms_old:
                     # Get the full SMS object
                     sms = sms[1]
+
+                    # Check if we should delete the SMS
+                    if self.delete_sms:
+                        try:
+                            # Delete the SMS
+                            if self.delete_sms(self.modem_ip, cookie, sms['id']) == False:
+                                log.error(f'Failed to delete SMS {sms["id"]}')
+                        except Exception as e:
+                            log.error(f'Failed to delete SMS {sms["id"]}: {e}')
+
                     # Decode the SMS content
                     content = self.decode_sms_content(sms['content'])
+
+                    blacklist = False
+                    # Run the SMS content through the blacklist
+                    for word in self.blacklist['words']:
+                        if word.search(content):
+                            log.info(f'Skipping SMS from {sms["number"]} as it contains a blacklisted word: {word.pattern}')
+                            blacklist = True
+                            break
+                    # Check if the SMS content is blacklisted
+                    if blacklist:
+                        continue
+
+                    # Run the SMS number through the blacklist
+                    for number in self.blacklist['numbers']:
+                        if number.search(sms['number']):
+                            log.info(f'Skipping SMS from {sms["number"]} as it is a blacklisted number: {number.pattern}')
+                            blacklist = True
+                            break
+                    # Check if the SMS number is blacklisted
+                    if blacklist:
+                        continue
+
                     # Decode the SMS timestamp
                     timestamp = self.decode_sms_timestamp(sms['date'])
                     # Check if the SMS is older than a day
@@ -342,6 +443,7 @@ class SMS:
 
                     log.info(f'Received new SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Message: {content}')
 
+                    # TODO: use a queue for this?
                     # Keep trying to send until it succeeds in case of network/server issues
                     while True:
                         try:
