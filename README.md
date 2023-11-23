@@ -1,5 +1,5 @@
 # zte-sms-smtp #
-An SMS SMTP relay for ZTE modems. Tested with a ZTE MF79U 4G USB modem.
+An SMS SMTP relay for ZTE modems. Tested and verified with a ZTE MF79U 4G USB modem.
 
 Configuration is done via environment variables
 
@@ -25,10 +25,12 @@ SMTP_SUBJECT_PREFIX             -   Prefix text to the subject field (str, optio
 ## blacklist.json ##
 Used for blacklisting words/phrases and numbers using case-sensitive regex
 
+Located at `/sms/blacklist.json` by default
+
 Example:
 ```
 {
-    "words": ["meuplano\.tim\.com\.br"],
+    "words": ["meuplano\\.tim\\.com\\.br"],
     "numbers": ["TIMInforma"]
 }
 ```

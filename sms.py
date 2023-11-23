@@ -8,6 +8,7 @@ import sys
 
 from base64 import b64encode
 from datetime import datetime
+from hashlib import md5
 from smtplib import SMTP
 from time import sleep
 
@@ -19,15 +20,21 @@ class SMS:
     def __init__(self):
         # Setup logging
         self._setup_logging()
-        # Load environment variables
-        self._load_env_vars()
-        # Create a new HTTP client
-        self.http = requests.Session()
+
+        # Modem firmware version, fetched after login
+        self.wa_inner_version = ''
 
         self.blacklist = {
             'numbers': [],
             'words': []
         }
+
+        # Load environment variables
+        self._load_env_vars()
+        # Load the SMS blacklist
+        self._load_blacklist()
+        # Create a new HTTP client
+        self.http = requests.Session()
 
     def _setup_logging(self):
         """
@@ -199,9 +206,9 @@ class SMS:
         # YY:MM:DD:HH:MM:SS
         return datetime.strptime(timestamp[:-4], '%y,%m,%d,%H,%M,%S')
 
-    def login(self, modem_ip: str, modem_pass: str) -> requests.cookies.RequestsCookieJar:
+    def login(self, modem_ip: str, modem_pass: str):
         """
-        Login to the ZTE modem and generate a session cookie
+        Login to the ZTE modem and generate a session
 
         Args:
             modem_ip (str): ZTE modem IP address
@@ -209,9 +216,6 @@ class SMS:
 
         Raises:
             Exception: Thrown if the login fails
-
-        Returns:
-            requests.cookies.RequestsCookieJar: Cookie jar containing a session cookie
         """
         # Login payload for ZTE modem web interface
         payload = {
@@ -235,18 +239,23 @@ class SMS:
         # Response should be {"result":"0"} on login success
         if login_request.json()['result'] != '0':
             raise Exception('Login failed')
+
         # Cache the response cookies
-        cookies = login_request.cookies
+        self.cookies = login_request.cookies
 
-        return cookies
+        # Fetch the modem firmware version and RD values
+        # Needed for deleting SMS messages
+        values = self.fetch_cmd_values(modem_ip, ['wa_inner_version'])
+        self.wa_inner_version = values['wa_inner_version']
 
-    def fetch_sms_inbox(self, modem_ip: str, cookies: requests.cookies.RequestsCookieJar) -> list[dict]:
+        log.debug(f'Logged in with stok {self.cookies["stok"]}, wa_inner_version {self.wa_inner_version}')
+
+    def fetch_sms_inbox(self, modem_ip: str) -> list[dict]:
         """
         Fetch all SMS messages from the ZTE modem
 
         Args:
             modem_ip (str): ZTE modem IP address
-            cookies (requests.cookies.RequestsCookieJar): Cookie jar containing a session cookie
 
         Returns:
             list[dict]: List of all SMS messages
@@ -272,21 +281,52 @@ class SMS:
             url,
             params=params,
             headers=headers,
-            cookies=cookies,
+            cookies=self.cookies,
             timeout=30
         )
 
         return sms_request.json()['messages']
+    
+    def fetch_cmd_values(self, modem_ip: str, values: list) -> str:
+        """
+        Fetch the firmware version value from the modem
+        """
+        # http://10.1.0.1/goform/goform_get_cmd_process?isTest=false&cmd=Language%2Ccr_version%2Cwa_inner_version&multi_data=1&_=1700768732444
+        url = f'http://{modem_ip}/goform/goform_get_cmd_process'
+        params = {
+            'isTest': False,
+            'cmd': ','.join(values),
+            'multi_data': 1
+        }
+        headers = {
+            'Host': f'{modem_ip}',
+            'Referer': f'http://{modem_ip}/index.html',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+        request = self.http.get(
+            url,
+            params=params,
+            headers=headers,
+            cookies=self.cookies,
+        )
 
-    def delete_sms(self, modem_ip: str, cookies: requests.cookies.RequestsCookieJar, sms_id: str) -> bool:
+        return request.json()
+
+    def delete_sms(self, modem_ip: str, sms_id: str):
         """
         Delete an SMS message from the ZTE modem
 
         Args:
             modem_ip (str): ZTE modem IP address
-            cookies (requests.cookies.RequestsCookieJar): Cookie jar containing a session cookie
             sms_id (int): SMS ID to delete
         """
+        # No clue why these are required to delete SMS messages, but they are
+        # MD5 hash wa_inner_version
+        rd0_md5 = md5(self.wa_inner_version.encode()).hexdigest()
+        # MD5 hash the rd0 hash and rd value
+        rd = self.fetch_cmd_values(modem_ip, ['RD'])['RD']
+        rd0_rd_md5 = md5(f'{rd0_md5}{rd}'.encode()).hexdigest()
+
         # POST http://10.1.0.1/goform/goform_set_cmd_process
         url = f'http://{modem_ip}/goform/goform_set_cmd_process'
         form = {
@@ -294,6 +334,7 @@ class SMS:
             'goformId': 'DELETE_SMS',
             'msg_id': f'{sms_id};',
             'notCallback': True,
+            'AD': rd0_rd_md5
         }
         headers = {
             'Host': f'{modem_ip}',
@@ -304,16 +345,18 @@ class SMS:
         sms_request = self.http.post(
             url,
             headers=headers,
-            cookies=cookies,
+            cookies=self.cookies,
             data=form,
             timeout=30
         )
 
         try:
             # Check if the SMS was deleted successfully
-            return sms_request.json()['result'] == 'success'
-        except (KeyError, json.decoder.JSONDecodeError):
-            return False
+            response = sms_request.json()
+            if response['result'] != 'success':
+                log.error(f'Failed to delete SMS {sms_id}: {response["result"]}')
+        except Exception as e:
+            log.error(f'Failed to delete SMS {sms_id}: {e}')
 
 
     def send_email(self, sender: str, recipient: str | list, subject: str, body: str, smtp_username: str, smtp_password: str, smtp_host: str, smtp_port: int, tls: bool):
@@ -348,10 +391,10 @@ class SMS:
         while True:
             try:
                 log.info('Fetching initial SMS inbox list...')
-                # Generate the initial session cookie
-                cookie = self.login(self.modem_ip, self.modem_password)
+                # Generate an initial session
+                self.login(self.modem_ip, self.modem_password)
                 # Fetch the initial SMS inbox list
-                sms_inbox = self.fetch_sms_inbox(self.modem_ip, cookie)
+                sms_inbox = self.fetch_sms_inbox(self.modem_ip)
                 break
             except requests.exceptions.ConnectTimeout:
                 log.warning('Initial login and fetch failed, retrying in 30 seconds')
@@ -367,7 +410,7 @@ class SMS:
 
             # Fetch the latest SMS inbox list
             try:
-                sms_inbox_latest = self.fetch_sms_inbox(self.modem_ip, cookie)
+                sms_inbox_latest = self.fetch_sms_inbox(self.modem_ip)
                 # Check if the inbox list is empty
                 if len(sms_inbox_latest) == 0:
                     log.debug('Got empty SMS inbox list, skipping')
@@ -379,13 +422,13 @@ class SMS:
                 log.warning(f'Failed to fetch SMS inbox: {e}')
                 continue
             except KeyError:
-                # Session cookie most likely expired
-                log.debug('Session cookie expired, generate new session')
-                # Generate a new session cookie
-                cookie = self.login(self.modem_ip, self.modem_password)
-                # Try to fetch the latest SMS inbox list with the new session cookie
+                # Session most likely expired
+                log.debug('Session expired, generate new session')
+                # Generate a new session
+                self.login(self.modem_ip, self.modem_password)
+                # Try to fetch the latest SMS inbox list with the new session
                 try:
-                    sms_inbox_latest = self.fetch_sms_inbox(self.modem_ip, cookie)
+                    sms_inbox_latest = self.fetch_sms_inbox(self.modem_ip)
                 except requests.exceptions.ConnectTimeout as e:
                     log.error(f'Failed to fetch SMS inbox: {e}')
                     continue
@@ -402,21 +445,24 @@ class SMS:
 
                     # Check if we should delete the SMS
                     if self.inbox_delete_sms:
-                        try:
-                            # Delete the SMS
-                            if self.delete_sms(self.modem_ip, cookie, sms['id']) == False:
-                                log.error(f'Failed to delete SMS {sms["id"]}')
-                        except Exception as e:
-                            log.error(f'Failed to delete SMS {sms["id"]}: {e}')
+                        # Delete the SMS
+                        self.delete_sms(self.modem_ip, sms['id'])
 
                     # Decode the SMS content
                     content = self.decode_sms_content(sms['content'])
+                    # Decode the SMS timestamp
+                    timestamp = self.decode_sms_timestamp(sms['date'])
+                    # Check if the SMS is older than a day
+                    if (datetime.now() - timestamp).days > 1:
+                        # Probably not actually a new SMS, skip it
+                        log.debug(f'Skipping SMS from {sms["number"]} as it is older than a day')
+                        continue
 
                     blacklist = False
                     # Run the SMS content through the blacklist
                     for word in self.blacklist['words']:
                         if word.search(content):
-                            log.info(f'Skipping SMS from {sms["number"]} as it contains a blacklisted word: {word.pattern}')
+                            log.warning(f'Received blacklisted SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Blacklisted Word: {word.pattern}, Message: {content}')
                             blacklist = True
                             break
                     # Check if the SMS content is blacklisted
@@ -426,22 +472,14 @@ class SMS:
                     # Run the SMS number through the blacklist
                     for number in self.blacklist['numbers']:
                         if number.search(sms['number']):
-                            log.info(f'Skipping SMS from {sms["number"]} as it is a blacklisted number: {number.pattern}')
+                            log.warning(f'Received blacklisted SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Blacklisted Number: {number.pattern}, Message: {content}')
                             blacklist = True
                             break
                     # Check if the SMS number is blacklisted
                     if blacklist:
                         continue
 
-                    # Decode the SMS timestamp
-                    timestamp = self.decode_sms_timestamp(sms['date'])
-                    # Check if the SMS is older than a day
-                    if (datetime.now() - timestamp).days > 1:
-                        # Probably not actually a new SMS, skip it
-                        log.debug(f'Skipping SMS from {sms["number"]} as it is older than a day')
-                        continue
-
-                    log.info(f'Received new SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Message: {content}')
+                    log.info(f'Received SMS: From: {sms["number"]}, Date: {timestamp.ctime()}, Message: {content}')
 
                     # TODO: use a queue for this?
                     # Keep trying to send until it succeeds in case of network/server issues
