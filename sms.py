@@ -129,7 +129,7 @@ class SMS:
 
         # Get the Delete SMS setting
         try:
-            self.delete_sms = bool(os.environ.get('MODEM_DELETE_SMS', True))
+            self.inbox_delete_sms = bool(os.environ.get('MODEM_DELETE_SMS', True))
         except ValueError:
             log.exception('Invalid DELETE_SMS environment variable, must be a boolean')
             exit(1)
@@ -401,7 +401,7 @@ class SMS:
                     sms = sms[1]
 
                     # Check if we should delete the SMS
-                    if self.delete_sms:
+                    if self.inbox_delete_sms:
                         try:
                             # Delete the SMS
                             if self.delete_sms(self.modem_ip, cookie, sms['id']) == False:
